@@ -1,0 +1,132 @@
+// Import necessary libraries
+use solana_program::{
+    account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, msg, pubkey::Pubkey, program,
+    program_pack::Pack, system_instruction,
+};
+
+// Define contract data structure
+#[repr(C)]
+pub struct SolanaLock {
+    pub owner: Pubkey,
+    pub locked_funds: u64,
+}
+
+// Program entry point
+#[entrypoint]
+fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    let accounts_iter = &mut accounts.iter();
+    let solana_lock_account = next_account_info(accounts_iter)?;
+
+    if solana_lock_account.owner != program_id {
+        return Err(solana_program::program_error::ProgramError::IncorrectProgramId);
+    }
+
+    let mut solana_lock_data = SolanaLock::unpack(&solana_lock_account.data.borrow())?;
+
+    match instruction_data[0] {
+        0 => lock_funds(accounts_iter, &mut solana_lock_data, instruction_data)?,
+        1 => unlock_funds()?; // Simplified, you would typically call the external bridge service here
+        2 => withdraw_funds(accounts_iter, &mut solana_lock_data, instruction_data)?,
+        3 => change_owner(accounts_iter, &mut solana_lock_data, instruction_data)?,
+        _ => return Err(solana_program::program_error::ProgramError::InvalidInstructionData),
+    }
+
+    SolanaLock::pack(solana_lock_data, &mut solana_lock_account.data.borrow_mut())?;
+    Ok(())
+}
+
+// Helper function: Lock funds in Solana
+fn lock_funds<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    solana_lock_data: &mut SolanaLock,
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let user_account = next_account_info(accounts_iter)?;
+    let amount = u64::from_le_bytes(instruction_data[1..9].try_into().unwrap());
+
+    let user_token_account = next_account_info(accounts_iter)?;
+    let token_balance = user_token_account.try_borrow_data()?;
+    let user_balance = u64::from_le_bytes(token_balance[0..8].try_into().unwrap());
+
+    if user_balance < amount {
+        return Err(solana_program::program_error::ProgramError::InsufficientFunds);
+    }
+
+    let transfer_ix = solana_program::system_instruction::transfer(user_account.key, &solana_lock_account.key, amount);
+    solana_program::program::invoke(&[transfer_ix], accounts_iter)?;
+
+    solana_lock_data.locked_funds += amount;
+
+    Ok(())
+}
+
+// Helper function: Unlock funds through the external bridge service
+fn unlock_funds() -> ProgramResult {
+    msg!("Unlocking funds on Solana. Triggering external bridge service...");
+
+    // Simplified, you would typically call the external bridge service here
+
+    Ok(())
+}
+
+// Helper function: Withdraw funds
+fn withdraw_funds<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    solana_lock_data: &mut SolanaLock,
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let user_account = next_account_info(accounts_iter)?;
+    let amount = u64::from_le_bytes(instruction_data[1..9].try_into().unwrap());
+
+    if solana_lock_data.locked_funds < amount {
+        return Err(solana_program::program_error::ProgramError::InsufficientFunds);
+    }
+
+    let transfer_ix = solana_program::system_instruction::transfer(&solana_lock_account.key, user_account.key, amount);
+    solana_program::program::invoke(&[transfer_ix], accounts_iter)?;
+
+    solana_lock_data.locked_funds -= amount;
+
+    Ok(())
+}
+
+// Helper function: Change contract owner
+fn change_owner<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    solana_lock_data: &mut SolanaLock,
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let caller_account = next_account_info(accounts_iter)?;
+
+    if &solana_lock_data.owner != caller_account.key {
+        return Err(solana_program::program_error::ProgramError::InvalidAccountData);
+    }
+
+    solana_lock_data.owner = Pubkey::new_from_array(<[u8; 32]>::try_from(&instruction_data[1..33]).unwrap());
+
+    Ok(())
+}
+
+// Helper function: Parse account information
+fn next_account_info<'a, 'b>(
+    iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+) -> Result<&'a AccountInfo<'b>, ProgramResult> {
+    iter.next().ok_or_else(|| solana_program::program_error::ProgramError::NotEnoughAccountKeys)
+}
+
+// Helper function: Pack contract data into storage space
+impl Pack for SolanaLock {
+    const LEN: usize = 40;
+
+    fn unpack_from_slice(src: &[u8]) -> Result<Self, solana_program::program_error::ProgramError> {
+        let owner = Pubkey::new_from_array(<[u8; 32]>::try_from(&src[0..32]).unwrap());
+        let locked_funds = u64::from_le_bytes(src[32..40].try_into().unwrap());
+
+        Ok(SolanaLock { owner, locked_funds })
+    }
+
+    fn pack_into_slice(&self, dst: &mut [u8]) {
+        dst[0..32].copy_from_slice(&self.owner.to_bytes());
+        dst[32..40].copy_from_slice(&self.locked_funds.to_le_bytes());
+    }
+}
